@@ -154,6 +154,7 @@ class ALPS(Sched):
         self.prio = {}                # func -> level
         self.next_learn = learn_every
         self.est_now = {}             # func -> estimated CPU ms (latest learning step)
+        self.level_log = []           # [(time, {func: level})] for Phase B
 
     # ---- frontend ---------------------------------------------------------
     def on_finish(self, t, now):
@@ -187,6 +188,7 @@ class ALPS(Sched):
             new[f] = min(self.levels - 1, int(cum / total * self.levels))
             cum += cnt[f]
         self.prio = new
+        self.level_log.append((now, dict(new)))
 
     # ---- backend ----------------------------------------------------------
     def _level(self, t, now):
