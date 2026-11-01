@@ -79,3 +79,27 @@ def test_alps_learner_orders_by_runtime():
     assert s.est_now["short"] < s.est_now["medium"] < s.est_now["long"]
     assert s.prio["short"] <= s.prio["medium"] <= s.prio["long"]
     assert s.prio["short"] < s.prio["long"]
+    
+    
+def test_switch_cost_zero_matches_default():
+    """switch_cost=0 must produce byte-identical results to no kwarg."""
+    base = gen_workload(5, 2, 0.8, seed=3)
+
+    def run(extra):
+        out = []
+        for make in (CFS, SRPT, ALPS, ALPSScore):
+            ts = [Task(t.tid, t.func, t.arrival, t.burst) for t in base]
+            r = simulate(ts, make(2), 2, **extra)
+            out.append([(t.tid, t.finish) for t in r])
+        return out
+
+    assert run({}) == run({"switch_cost": 0})
+
+
+def test_switch_cost_produces_switches():
+    """switch_cost>0 must record switches on a busy workload."""
+    base = gen_workload(5, 2, 0.8, seed=3)
+    s = CFS(2)
+    ts = [Task(t.tid, t.func, t.arrival, t.burst) for t in base]
+    simulate(ts, s, 2, switch_cost=1)
+    assert s.n_switches > 0

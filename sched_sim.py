@@ -129,6 +129,7 @@ class Sched:
         self.ncores = ncores
         self.q = []
         self.min_vr = 0.0
+        self.n_switches = 0            # Phase E: populated by simulate()
 
     # --- hooks -------------------------------------------------------------
     def add(self, t, now, new=False):
@@ -311,18 +312,26 @@ class ALPSScore(ALPS):
 # ----------------------------------------------------------------------------
 # Simulator core (tick-based, global run queue, N cores)
 # ----------------------------------------------------------------------------
-def simulate(tasks, sched, ncores):
+def simulate(tasks, sched, ncores, switch_cost=0):
+    """Run the tick loop. switch_cost (ms) is a stall inserted when a core
+    picks a *different* task than the one it last ran. Stalled ticks do NOT
+    count against the task's time slice — the overhead is a fixed tax per
+    switch, not a drain on slice. switch_cost=0 reproduces the old results.
+    """
     tasks = sorted(tasks, key=lambda t: t.arrival)
     i, now, done = 0, 0, 0
     cores = [None] * ncores
     left = [0] * ncores
+    last = [None] * ncores
+    stall = [0] * ncores
+    switches = 0
     while done < len(tasks):
         while i < len(tasks) and tasks[i].arrival <= now:
             sched.add(tasks[i], now, new=True)
             i += 1
         sched.tick(now)
 
-        # fast-forward when fully idle
+
         if not sched.q and all(c is None for c in cores):
             if i < len(tasks):
                 now = tasks[i].arrival
@@ -331,17 +340,24 @@ def simulate(tasks, sched, ncores):
         for c in range(ncores):
             cur = cores[c]
             if cur is not None and (left[c] <= 0 or sched.preempts(cur, now)):
-                sched.add(cur, now)                     # preempted: back to queue
+                sched.add(cur, now)
                 cores[c] = cur = None
             if cur is None and sched.q:
                 busy = sum(1 for x in cores if x is not None)
                 cur = sched.pick(now)
                 cores[c] = cur
                 left[c] = sched.slice(cur, len(sched.q) + busy + 1)
+                if switch_cost and last[c] is not cur:
+                    stall[c] = switch_cost
+                    switches += 1
+                last[c] = cur
 
-        for c in range(ncores):                          # run 1 ms
+        for c in range(ncores):
             t = cores[c]
             if t is None:
+                continue
+            if stall[c] > 0:
+                stall[c] -= 1
                 continue
             t.remaining -= 1
             left[c] -= 1
@@ -352,6 +368,7 @@ def simulate(tasks, sched, ncores):
                 cores[c] = None
                 done += 1
         now += 1
+    sched.n_switches = switches
     return tasks
 
 
