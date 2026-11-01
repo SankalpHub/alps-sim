@@ -45,24 +45,74 @@ FUNCS = {
 }
 
 
-def gen_workload(duration_s, cores, util, seed, burst_period_s=2.0, hi=1.6, lo=0.4):
-    """Bursty arrivals: alternating high/low rate segments, lognormal runtimes."""
+def gen_workload(duration_s, cores, util, seed, burst_period_s=2.0, hi=1.6, lo=0.4,
+                 drift=None, sigma=None, heavy_tail=False, new_func=None):
+    """Bursty arrivals: alternating high/low rate segments, lognormal runtimes.
+
+    Phase C extensions (all default to None/False -> behaviour unchanged):
+      drift      : {'api': (30, 3.0)} — after 30 s, api mean CPU x 3.
+      sigma      : {'api': 1.0} or a scalar — per-function lognormal stdev.
+                   Default None keeps the historical 0.3 for all functions.
+      heavy_tail : True (all) or ['etl','ml'] — use a Pareto(k=2.5) instead
+                   of lognormal for those functions (mean held fixed).
+      new_func   : (time_s, name, mean_ms, share) — introduce a new function
+                   type at time_s; before that it does not arrive.
+    """
     rng = random.Random(seed)
-    names = list(FUNCS)
-    shares = [FUNCS[n][1] for n in names]
-    mean_service = sum(FUNCS[n][0] * FUNCS[n][1] for n in names)
-    base_rate = util * cores / mean_service            # arrivals per ms
+    local_funcs = dict(FUNCS)
+    names = list(local_funcs)
+    shares = [local_funcs[n][1] for n in names]
+    default_sigma = 0.3
+
+    def _sigma(f):
+        if sigma is None:
+            return default_sigma
+        if isinstance(sigma, dict):
+            return sigma.get(f, default_sigma)
+        return sigma
+
+    def _mean_at(f, t_ms):
+        mean = local_funcs[f][0]
+        if drift and f in drift:
+            ts_s, mult = drift[f]
+            if t_ms >= ts_s * 1000:
+                mean *= mult
+        return mean
+
+    def _is_heavy(f):
+        if heavy_tail is True:
+            return True
+        if isinstance(heavy_tail, (list, tuple, set)):
+            return f in heavy_tail
+        return False
+
+    def _draw_burst(f, t_ms):
+        mean = _mean_at(f, t_ms)
+        if _is_heavy(f):
+            k = 2.5
+            xm = mean * (k - 1) / k
+            return max(1, int(rng.paretovariate(k) * xm))
+        s = _sigma(f)
+        mu = math.log(mean) - s * s / 2   # E[lognormal] = exp(mu + s^2/2)
+        return max(1, int(rng.lognormvariate(mu, s)))
+
+    mean_service = sum(local_funcs[n][0] * local_funcs[n][1] for n in names)
+    base_rate = util * cores / mean_service
     tasks, tid, t = [], 0, 0.0
     horizon = duration_s * 1000
     while t < horizon:
+        if new_func and t >= new_func[0] * 1000 and new_func[1] not in local_funcs:
+            nf_name, nf_mean, nf_share = new_func[1], new_func[2], new_func[3]
+            local_funcs[nf_name] = (nf_mean, nf_share)
+            names.append(nf_name)
+            shares.append(nf_share)
         seg = int(t // (burst_period_s * 1000))
         rate = base_rate * (hi if seg % 2 == 0 else lo)
         t += rng.expovariate(rate)
         if t >= horizon:
             break
         f = rng.choices(names, shares)[0]
-        mean = FUNCS[f][0]
-        burst = max(1, int(rng.lognormvariate(math.log(mean) - 0.045, 0.3)))
+        burst = _draw_burst(f, t)
         tasks.append(Task(tid, f, int(t), burst))
         tid += 1
     return tasks
